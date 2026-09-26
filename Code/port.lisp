@@ -97,6 +97,40 @@
   (defmacro write-memory-barrier ()
     '(sb-thread:barrier (:write))))
 
+#+torcl
+(progn
+  ;; TorCL has kernel threads and exports its mutex API from TORCL-THREAD.
+  ;; MAKE-MUTEX takes the name as a keyword, not positionally, and fset calls
+  ;; `make-lock' both with a string ("Tuple Key Lock") and with a symbol (from
+  ;; `define-atomic-series'), so coerce with `string' the way the SBCL branch does.
+  (defun make-lock (&optional name)
+    (torcl-thread:make-mutex :name (and name (string name))))
+  ;; TORCL-THREAD:WITH-MUTEX always blocks -- it accepts no :wait-p -- but
+  ;; `with-lock' must return WITHOUT evaluating the body when `wait?' is false
+  ;; and the lock is already held. So acquire through GRAB-MUTEX, which returns
+  ;; NIL rather than signalling when a non-blocking acquire fails, and release
+  ;; under UNWIND-PROTECT so a non-local exit out of the body cannot leak it.
+  (defmacro with-lock ((lock &key (wait? t)) &body body)
+    (let ((lock-var (gensym "LOCK-"))
+	  (held-var (gensym "HELD-")))
+      `(let* ((,lock-var ,lock)
+	      (,held-var (torcl-thread:grab-mutex ,lock-var :waitp ,wait?)))
+	 (when ,held-var
+	   (unwind-protect (progn . ,body)
+	     (torcl-thread:release-mutex ,lock-var))))))
+  ;; TorCL exposes no standalone barrier primitive, so follow the
+  ;; Allegro/LispWorks/Clasp precedent in this file and use a lock round trip.
+  ;; These must NOT be stubbed to `nil': fset relies on them around lock-free
+  ;; reads of its transient structures.
+  (defvar *Memory-Barrier-Lock*
+    (torcl-thread:make-mutex :name "Memory Barrier Lock"))
+  (defmacro read-memory-barrier ()
+    '(torcl-thread:with-mutex (*Memory-Barrier-Lock*)
+       nil))
+  (defmacro write-memory-barrier ()
+    '(torcl-thread:with-mutex (*Memory-Barrier-Lock*)
+       nil)))
+
 #+(and clasp threads)
 (progn
   (defun make-lock (&optional name)
@@ -393,6 +427,10 @@
   (code-char (+ code (ash bits 8))))
 
 #+ecl
+(defun make-char (code bits)
+  (code-char (+ code (ash bits 8))))
+
+#+torcl
 (defun make-char (code bits)
   (code-char (+ code (ash bits 8))))
 
